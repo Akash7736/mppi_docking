@@ -1,4 +1,4 @@
-from .mppi import MPPIPlanner
+from mppi import MPPIPlanner
 import torch
 torch.set_grad_enabled(False)
 import os

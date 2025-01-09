@@ -6,10 +6,8 @@ import time
 import math
 from PIL import Image, ImageDraw
 import yaml
-from dynamics import JackalDynamics, QuarterRoboatDynamics, WAMVDynamics, WAMVSindyDynamics, QuarterRoboatLSTMDynamics
-from dynamics_onrt_torch import VesselDynamics
-from objective import RoboatObjective, SocialNavigationObjective
-from ia_mppi.ia_mppi import IAMPPIPlanner
+from dynamics import QuarterRoboatDynamics
+
 import torch 
 import os
 import scipy.ndimage
@@ -49,7 +47,12 @@ class Agent:
         # self.startOrientation = p.getQuaternionFromEuler([np.pi, 0, 0])
 # "E:\\interaction_aware_mppi\\examples\\roboats\\aritra.urdf"
 
-        self.robotId = p.loadURDF(agent_cfg['urdf'], basePosition=self.pos, baseOrientation=p.getQuaternionFromEuler(self.rot), useFixedBase=True)
+        # self.robotId = p.loadURDF("aritra.urdf", basePosition=self.pos, baseOrientation=p.getQuaternionFromEuler(self.rot), useFixedBase=True)
+        urdf_path = os.path.abspath("aritra.urdf")
+        try:
+            self.robotId = p.loadURDF(urdf_path, basePosition=self.pos, baseOrientation=p.getQuaternionFromEuler(self.rot), useFixedBase=True)
+        except Exception as e:
+            print(f"Error loading URDF: {e}")
 
         self.urdf_id = self.robotId
         
@@ -219,7 +222,7 @@ class BulletSimulator:
         self.trajectory_color = [1, 0, 0, 1]  # Red color for trajectory
         self.marker_color = [0, 1, 0, 1]
 
-        CONFIG = yaml.safe_load(open(f"cfg_roboats.yaml"))
+        CONFIG = yaml.safe_load(open(f"cfg_docking.yaml"))
         self.agent_dynamics = QuarterRoboatDynamics(
          cfg=CONFIG
     )

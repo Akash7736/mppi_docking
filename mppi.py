@@ -7,7 +7,7 @@ from scipy import signal
 import scipy.interpolate as si
 from dataclasses import dataclass, field
 from abc import ABC, abstractmethod
-from .mppi_utils import generate_gaussian_halton_samples, scale_ctrl, cost_to_go
+from mppi_utils import generate_gaussian_halton_samples, scale_ctrl, cost_to_go
 
 
 def _ensure_non_zero(cost, beta, factor):

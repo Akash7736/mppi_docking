@@ -4,7 +4,7 @@ from bulletsim_aritra_docking import BulletSimulator
 # from objective import RoboatObjective, SocialNavigationObjective
 from objective import RoboatObjective, SocialNavigationObjective
 from dynamics import QuarterRoboatDynamics, WAMVDynamics, WAMVSindyDynamics, QuarterRoboatLSTMDynamics
-from ia_mppi.ia_mppi import IAMPPIPlanner
+from ia_mppi import IAMPPIPlanner
 import yaml
 from tqdm import tqdm
 import copy
