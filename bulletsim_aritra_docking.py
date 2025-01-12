@@ -6,8 +6,10 @@ import time
 import math
 from PIL import Image, ImageDraw
 import yaml
-from dynamics import QuarterRoboatDynamics
-
+from dynamics import JackalDynamics, QuarterRoboatDynamics, WAMVDynamics, WAMVSindyDynamics, QuarterRoboatLSTMDynamics
+from dynamics_onrt_torch import VesselDynamics
+from objective import RoboatObjective, SocialNavigationObjective
+from ia_mppi.ia_mppi import IAMPPIPlanner
 import torch 
 import os
 import scipy.ndimage
@@ -30,7 +32,7 @@ sim_logger.info("Logging from sim file.")
 GRID_SIZE = 1000         # 1000 x 1000 grid
 RESOLUTION = 0.1         # Each grid cell represents 0.1m
 SUB_GRID_SIZE = 80       # Sub-grid size 80 x 80 for an 8m x 8m region
-GLOBAL_COST_MAP = False
+GLOBAL_COST_MAP = True
 
 class Agent:
     def __init__(self, device, agent_cfg):
@@ -47,12 +49,7 @@ class Agent:
         # self.startOrientation = p.getQuaternionFromEuler([np.pi, 0, 0])
 # "E:\\interaction_aware_mppi\\examples\\roboats\\aritra.urdf"
 
-        # self.robotId = p.loadURDF("aritra.urdf", basePosition=self.pos, baseOrientation=p.getQuaternionFromEuler(self.rot), useFixedBase=True)
-        urdf_path = os.path.abspath("aritra.urdf")
-        try:
-            self.robotId = p.loadURDF(urdf_path, basePosition=self.pos, baseOrientation=p.getQuaternionFromEuler(self.rot), useFixedBase=True)
-        except Exception as e:
-            print(f"Error loading URDF: {e}")
+        self.robotId = p.loadURDF(agent_cfg['urdf'], basePosition=self.pos, baseOrientation=p.getQuaternionFromEuler(self.rot), useFixedBase=True)
 
         self.urdf_id = self.robotId
         
@@ -179,14 +176,6 @@ class Agent:
                 p.addUserDebugLine(self.lidar_position, [x, y, z], color, 1, 0.1)
 
 
-class ObjectiveCost:
-    def __init__(self,goals=None,device="cuda:0") :
-        self.costmap = torch.zeros(80, 80)
-        self.nav_goals = torch.tensor(goals, device=device).unsqueeze(0)
-        
-    def compute_running_cost(self, state: torch.Tensor):
-        return self._goal_cost(state[:, :, 0:2])  + self._vel_cost(state) + self._heading_to_goal(state)
-    
 
 class BulletSimulator:
     def __init__(self, cfg):
@@ -222,7 +211,7 @@ class BulletSimulator:
         self.trajectory_color = [1, 0, 0, 1]  # Red color for trajectory
         self.marker_color = [0, 1, 0, 1]
 
-        CONFIG = yaml.safe_load(open(f"cfg_docking.yaml"))
+        CONFIG = yaml.safe_load(open(f"cfg_roboats.yaml"))
         self.agent_dynamics = QuarterRoboatDynamics(
          cfg=CONFIG
     )
@@ -340,7 +329,9 @@ class BulletSimulator:
             return distance_grid
 
         
-        if GLOBAL_COST_MAP: self.global_cost_map = initialize_distance_grid(self.goal_position[0], self.goal_position[1]) 
+        if GLOBAL_COST_MAP: 
+            self.global_cost_map = initialize_distance_grid(self.goal_position[0], self.goal_position[1]) 
+            print("GLOBAL MAP GENERATED !!!")
         else:
             print("NO GC MAP GENERATED !!")
             self.global_cost_map =torch.zeros((GRID_SIZE, GRID_SIZE), dtype=torch.float32) #np.full(grid_size, 1.0)  # Base cost for open cells
@@ -396,8 +387,9 @@ class BulletSimulator:
         )
         self.global_cost_map[inflated_obstacles] = 500.0
 
-        non_goal_dock_x_min, non_goal_dock_x_max = self.cartesian_to_grid(10-3, 0)[0], self.cartesian_to_grid(10+2, 0)[0]
-        non_goal_dock_y_min, non_goal_dock_y_max = self.cartesian_to_grid(0, 2.5-1.5)[1], self.cartesian_to_grid(0, 2.5+1)[1]
+        # non_goal_dock_x_min, non_goal_dock_x_max = self.cartesian_to_grid(10-3, 0)[0], self.cartesian_to_grid(10+2, 0)[0]
+        # non_goal_dock_y_min, non_goal_dock_y_max = self.cartesian_to_grid(0, 2.5-1.5)[1], self.cartesian_to_grid(0, 2.5+1)[1]
+        
         # non_goal_dock_x, non_goal_dock_y = self.cartesian_to_grid(10-0.5,5-0.5)
         #****************
         # Check inflated non_dock position, could be reason vessel is not going inside. Global map and sim is different. 
@@ -413,7 +405,7 @@ class BulletSimulator:
                 self.local_cost = None 
                 self.curr_pos = None  '''
 
-        self.global_cost_map[non_goal_dock_x_min:non_goal_dock_x_max, non_goal_dock_y_min:non_goal_dock_y_max] = 700.0
+        # self.global_cost_map[non_goal_dock_x_min:non_goal_dock_x_max, non_goal_dock_y_min:non_goal_dock_y_max] = 700.0
        #****************
     #    =-9-=         # inflated_dock = scipy.ndimage.binary_dilation(
         #     self.global_cost_map == 50.0, structure=np.ones((12, 12))

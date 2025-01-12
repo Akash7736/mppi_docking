@@ -4,7 +4,7 @@ from bulletsim_aritra_docking import BulletSimulator
 # from objective import RoboatObjective, SocialNavigationObjective
 from objective import RoboatObjective, SocialNavigationObjective
 from dynamics import QuarterRoboatDynamics, WAMVDynamics, WAMVSindyDynamics, QuarterRoboatLSTMDynamics
-from ia_mppi import IAMPPIPlanner
+from ia_mppi.ia_mppi import IAMPPIPlanner
 import yaml
 from tqdm import tqdm
 import copy
@@ -13,17 +13,26 @@ from datalogger import DataLogger, generate_random_goals
 from docking import * 
 import pybullet as p 
 
+
+
+def setup_visualization():
+    """Create directories for visualization outputs"""
+    os.makedirs('maps', exist_ok=True)
+
+
 # Load the config file
 abs_path = os.path.dirname(os.path.abspath(__file__))
 CONFIG = yaml.safe_load(open(f"{abs_path}/cfg_docking.yaml"))
 # CONFIG = yaml.safe_load(open(f"{abs_path}/cfg_onrt.yaml"))
-
+dock_center = None 
 
 def run_point_robot_example():
     data_logger = DataLogger()
 
     agent_info = CONFIG['agents']['agent0']  # For agent0, modify as needed
-    dock_estimator = HybridDockEstimator(device=CONFIG["device"])
+    # dock_estimator = HybridDockEstimator(device=CONFIG["device"])
+    setup_visualization()
+    dock_estimator = DockEstimator()
 
 # Initialize the agent goals and device
     # goals = [
@@ -76,59 +85,75 @@ def run_point_robot_example():
         # print("HELLO")
         start_time = time.time()
 
-        if aritrasim._agents['agent0'].robotId:
+        # if aritrasim._agents['agent0'].robotId:
             # Get LiDAR data
-            lidar_distances, lidar_position, lidar_coords = aritrasim._agents['agent0'].get_lidar_data(
-                enable_noise=True,
-                noise_std=0.1
-            )
+        lidar_distances, lidar_position, lidar_coords = aritrasim._agents['agent0'].get_lidar_data(
+            enable_noise=True,
+            noise_std=0.1
+        )
+        
+        lidar_scan = {
+            'ranges': lidar_distances,
+            'angle_increment': np.pi/1800,  # 0.2 degree
+            'angle_min': 0,
+            'angle_max': 2*np.pi,
+            'world_cords': lidar_coords
+        }
+
+        # Get vessel state
+        pos, orn = p.getBasePositionAndOrientation(aritrasim._agents['agent0'].robotId)
+        euler = p.getEulerFromQuaternion(orn)
+        # In run_point_robot_example()
+        vessel_pose = torch.tensor([pos[0], pos[1], euler[2]], 
+                                device=CONFIG["device"], 
+                                dtype=torch.float32)
+
+        if step % 5 == 0:
+            dock_estimator.lidar_scan =  lidar_scan
+            dock_center, clearances, dock_orientation_angle, world_points, labels, corner_points_world, slopes = dock_estimator.get_dock_center(vessel_pose, step)
+            if (dock_orientation_angle is not None and 
+                isinstance(dock_center, np.ndarray) and 
+                dock_center.size > 0 and
+                isinstance(clearances, (list, np.ndarray)) and 
+                len(clearances) > 0):
+                planner._agent_cost.update_dock_state(dock_center, clearances, dock_orientation_angle, world_points, labels,corner_points_world, slopes)
+        # Add GPS noise
+        gps_noise = torch.randn(2, device=CONFIG["device"]) * 2.0  # 2m std dev
+        gps_reading = torch.tensor([pos[0], pos[1]], device=CONFIG["device"]) + gps_noise
+
+        # Compute control input
+        dt = CONFIG['dt']
+        if last_vessel_pose is not None:
+            dt = CONFIG['dt']
+            control_input = (vessel_pose - last_vessel_pose) / dt
+        else:
+            control_input = torch.zeros(3, device=CONFIG["device"])
+        last_vessel_pose = vessel_pose
+        # local_cost_map = dock_estimator.update(
+        #         lidar_scan=lidar_scan,
+        #         gps_reading=gps_reading,
+        #         vessel_pose=vessel_pose,
+        #         control_input=control_input,
+        #         current_time=current_time,
+        #         dt=dt
+        #     )
             
-            lidar_scan = {
-                'ranges': lidar_distances,
-                'angle_increment': np.pi/1800,  # 0.2 degree
-                'angle_min': 0,
-                'angle_max': 2*np.pi
-            }
+        # Update planner cost with new map and estimator state
+        planner._agent_cost.curr_pos = vessel_pose[:2] #aritrasim.agent_position
+        
+            
+        # planner._agent_cost.local_cost = local_cost_map
 
-            # Get vessel state
-            pos, orn = p.getBasePositionAndOrientation(aritrasim._agents['agent0'].robotId)
-            euler = p.getEulerFromQuaternion(orn)
-           # In run_point_robot_example()
-            vessel_pose = torch.tensor([pos[0], pos[1], euler[2]], 
-                                    device=CONFIG["device"], 
-                                    dtype=torch.float32)
-
-            # Add GPS noise
-            gps_noise = torch.randn(2, device=CONFIG["device"]) * 2.0  # 2m std dev
-            gps_reading = torch.tensor([pos[0], pos[1]], device=CONFIG["device"]) + gps_noise
-
-            # Compute control input
-            if last_vessel_pose is not None:
-                dt = CONFIG['dt']
-                control_input = (vessel_pose - last_vessel_pose) / dt
-            else:
-                control_input = torch.zeros(3, device=CONFIG["device"])
-            last_vessel_pose = vessel_pose
-
-            # Update dock estimator
-            cost_map = dock_estimator.update(
-                lidar_scan=lidar_scan,
-                gps_reading=gps_reading,
-                vessel_pose=vessel_pose,
-                control_input=control_input,
-                current_time = current_time,
-                dt=CONFIG['dt']
-            )
-
-            # Update planner cost with new map and estimator state
-            planner._agent_cost.curr_pos = aritrasim.agent_position
-            planner._agent_cost.update_dock_state(dock_estimator.state, dock_estimator.covariance)
-            planner._agent_cost.local_cost = cost_map
-
-            # Visualize current state periodically
-            if step % 50 == 0:
-                save_feature_maps(dock_estimator, step)
-                # dock_estimator.visualize_state()
+        # Visualize current state periodically
+        # if step % 50 == 0:
+        #     visualize_docking_scenario(
+        #         dock_estimator=dock_estimator,
+        #         vessel_pose=vessel_pose,
+        #         lidar_scan=lidar_scan,
+        #         step=step
+        #     )
+            # save_maps(dock_estimator, step, lidar_scan=lidar_scan)
+            # dock_estimator.visualize_state()
 
 
 
@@ -145,7 +170,7 @@ def run_point_robot_example():
         # observation = simulator.step(action) # step up all agents with first action sequence and return an observation dict
        
         observation = aritrasim.step(action) # step up all agents with first action sequence and return an observation dict
-        print(f"obs {observation} action {action}")
+        # print(f"obs {observation} action {action}")
         
         data_logger.log_data(observation, action)
         # Apply on simulator
