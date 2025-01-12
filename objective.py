@@ -1,7 +1,7 @@
 import torch
 import time
 import numpy as np
-
+import onrt.module_kinematics as kin
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
 import os
@@ -18,11 +18,13 @@ main_logger.addHandler(file_handler)
 
 main_logger.info("Logging from main file.")
 
-GRID_SIZE = 1000         # 1000 x 1000 grid
-RESOLUTION = 0.1         # Each grid cell represents 0.1m
-SUB_GRID_SIZE = 80       # Sub-grid size 80 x 80 for an 8m x 8m region
+GRID_SIZE = 200         # Reduced grid size for better performance
+RESOLUTION = 0.1       # Increased resolution (fewer cells)
+SUB_GRID_SIZE = 80     # Smaller local map   # Sub-grid size 80 x 80 for an 8m x 8m region
 abs_path = os.path.dirname(os.path.abspath(__file__))
 CONFIG = yaml.safe_load(open(f"{abs_path}/cfg_docking.yaml"))
+
+
 
 class RoboatObjective(object):
     def __init__(self, goals, device="cuda:0", dock_estimator=None):
@@ -39,7 +41,7 @@ class RoboatObjective(object):
 
 
            # Dock-specific weights
-        self._wall_clearance_weight = 4.0
+        self._wall_clearance_weight = 2.0
         self._entrance_alignment_weight = 2.5
         self._dock_orientation_weight = 2.0
         self._safety_margin = 0.8
@@ -48,36 +50,398 @@ class RoboatObjective(object):
         self.local_cost = None
         self.curr_pos = None
         self.dock_estimator = dock_estimator
-        self.dock_state = None
-        self.dock_uncertainty = None  
-       
+        self.dock_center  = None
+        self.dock_orientation = None  
+        self.dock_clearances = None 
+        self._dock_entrance_weight = 3.0
+        self._clearance_weight = 2.0
+        self.world_points = None 
+        self.labels = None 
+        self.entrance_point = None
+        self.dec_flag = True
+        self.slopes = None
+        self.dock_clearance_module = None 
 
-    def update_dock_state(self, dock_state, dock_covariance):
+    # def dock_clearance_cost(self, positions, safe_distance=1.5):
+    #     """
+    #     Cost function that computes clearance using vessel corner points for all trajectory points.
+        
+    #     Args:
+    #         positions (torch.Tensor): The positions and orientations of the vessel [batch, agents, state_dim]
+        
+    #     Returns:
+    #         torch.Tensor: Clearance cost for each position [batch, agents]
+    #     """
+    #     if (not hasattr(self, 'world_points') or 
+    #         not hasattr(self, 'labels') or 
+    #         self.world_points is None or 
+    #         self.labels is None):
+    #         return torch.zeros(positions.shape[0], positions.shape[1], device=positions.device)
+
+    #     # Vessel dimensions
+    #     length = 1.5  # Length of the vessel
+    #     width = 1.0   # Width of the vessel
+        
+    #     # Define corner points in local frame
+    #     corner_points_local = torch.tensor([
+    #         [0.5 * length, 0.5 * width],   # front-right
+    #         [0.5 * length, -0.5 * width],  # back-right
+    #         [-0.5 * length, 0.5 * width],  # front-left
+    #         [-0.5 * length, -0.5 * width]  # back-left
+    #     ], device=positions.device)
+        
+    #     # Get positions and orientations from state
+    #     vessel_positions = positions[:, :, 0:2]  # [batch, agents, 2]
+    #     vessel_orientations = positions[:, :, 2]  # [batch, agents]
+
+    #     # Initialize cost tensor
+    #     cost = torch.zeros(positions.shape[0], positions.shape[1], device=positions.device)
+        
+    #     # Convert world_points and labels to torch tensors
+    #     world_points = torch.tensor(self.world_points, device=positions.device)
+    #     labels = torch.tensor(self.labels, device=positions.device)
+        
+    #     # Number of clusters/walls
+    #     n_components = len(np.unique(self.labels[self.labels != -1]))
+        
+    #     # For each batch and agent
+    #     for batch_idx in range(positions.shape[0]):
+    #         for agent_idx in range(positions.shape[1]):
+    #             # Get current position and orientation
+    #             pos = vessel_positions[batch_idx, agent_idx]
+    #             theta = vessel_orientations[batch_idx, agent_idx]
+                
+    #             # Create rotation matrix
+    #             cos_theta = torch.cos(theta)
+    #             sin_theta = torch.sin(theta)
+    #             rotation_matrix = torch.tensor([
+    #                 [cos_theta, -sin_theta],
+    #                 [sin_theta, cos_theta]
+    #             ], device=positions.device)
+                
+    #             # Rotate corner points
+    #             corner_points_rotated = torch.mm(corner_points_local, rotation_matrix.T)
+                
+    #             # Translate corner points
+    #             corner_points_world = corner_points_rotated + pos.unsqueeze(0)
+                
+    #             # For each wall cluster
+    #             for wall_idx in range(n_components):
+    #                 # Get points belonging to current wall
+    #                 cluster_mask = labels == wall_idx
+    #                 cluster_points = world_points[cluster_mask]
+                    
+    #                 if len(cluster_points) == 0:
+    #                     continue
+                    
+    #                 # Convert cluster points to torch tensor if needed
+    #                 cluster_points = torch.tensor(cluster_points, device=positions.device)
+                    
+    #                 # Compute distances between all corner points and all cluster points
+    #                 # corner_points_world: [4, 2], cluster_points: [n_points, 2]
+    #                 distances = torch.norm(
+    #                     corner_points_world.unsqueeze(1) - cluster_points.unsqueeze(0),
+    #                     dim=2
+    #                 )  # [4, n_points]
+                    
+    #                 # Get minimum distance from any corner to any cluster point
+    #                 min_distance = torch.min(distances)
+                    
+    #                 # Apply constant costs based on zones
+    #                 if min_distance < 0.25:  # Critical zone
+    #                     cost[batch_idx, agent_idx] += 10.0
+    #                 elif min_distance < 0.5:  # Danger zone
+    #                     cost[batch_idx, agent_idx] += 5.0
+        
+    #     # Scale the total cost
+    #     self._clearance_weight = 2.0
+    #     cost = cost * self._clearance_weight
+        
+    #     return cost
+
+
+    # def dock_clearance_cost(self, positions, safe_distance=1.5):
+    #     """
+    #     Vectorized cost function for vessel clearance computation.
+    #     """
+    #     if (not hasattr(self, 'world_points') or 
+    #         not hasattr(self, 'labels') or 
+    #         self.world_points is None or 
+    #         self.labels is None):
+    #         return torch.zeros(positions.shape[0], positions.shape[1], device=positions.device)
+
+    #     # Vessel dimensions
+    #     length = 1.5  # Length of the vessel
+    #     width = 1.0   # Width of the vessel
+        
+    #     # Define corner points in local frame [4, 2]
+    #     corner_points_local = torch.tensor([
+    #         [0.5 * length, 0.5 * width],   # front-right
+    #         [0.5 * length, -0.5 * width],  # back-right
+    #         [-0.5 * length, 0.5 * width],  # front-left
+    #         [-0.5 * length, -0.5 * width]  # back-left
+    #     ], device=positions.device)
+        
+    #     # Get positions and orientations
+    #     vessel_positions = positions[:, :, 0:2]  # [batch, agents, 2]
+    #     vessel_orientations = positions[:, :, 2]  # [batch, agents]
+        
+    #     batch_size, num_agents = positions.shape[0], positions.shape[1]
+        
+    #     # Convert orientations for vectorized rotation [batch, agents]
+    #     cos_theta = torch.cos(vessel_orientations)
+    #     sin_theta = torch.sin(vessel_orientations)
+        
+    #     # Create rotation matrices [batch, agents, 2, 2]
+    #     rot_matrices = torch.stack([
+    #         torch.stack([cos_theta, -sin_theta], dim=-1),
+    #         torch.stack([sin_theta, cos_theta], dim=-1)
+    #     ], dim=-2)
+        
+    #     # Expand corner points for batch computation [1, 1, 4, 2]
+    #     corner_points_local = corner_points_local.unsqueeze(0).unsqueeze(0)
+        
+    #     # Rotate all corner points at once [batch, agents, 4, 2]
+    #     corner_points_rotated = torch.matmul(corner_points_local, rot_matrices.transpose(-1, -2))
+        
+    #     # Add vessel positions to get world coordinates [batch, agents, 4, 2]
+    #     corner_points_world = corner_points_rotated + vessel_positions.unsqueeze(2)
+        
+    #     # Prepare wall clusters
+    #     world_points = torch.tensor(self.world_points, device=positions.device)
+    #     labels = torch.tensor(self.labels, device=positions.device)
+    #     n_components = len(np.unique(self.labels[self.labels != -1]))
+        
+    #     # Initialize minimum distances tensor
+    #     min_distances = torch.ones(batch_size, num_agents, device=positions.device) * float('inf')
+        
+    #     # Compute distances for each wall cluster
+    #     for wall_idx in range(n_components):
+    #         cluster_mask = labels == wall_idx
+    #         cluster_points = world_points[cluster_mask]
+            
+    #         if len(cluster_points) == 0:
+    #             continue
+                
+    #         # Expand cluster points [1, 1, 1, n_points, 2]
+    #         cluster_points = cluster_points.unsqueeze(0).unsqueeze(0).unsqueeze(0)
+            
+    #         # Compute distances between all corners and all cluster points
+    #         # [batch, agents, 4, n_points]
+    #         distances = torch.norm(
+    #             corner_points_world.unsqueeze(3) - cluster_points,
+    #             dim=-1
+    #         )
+            
+    #         # Update minimum distances
+    #         wall_min_distances = torch.min(torch.min(distances, dim=-1)[0], dim=-1)[0]
+    #         min_distances = torch.minimum(min_distances, wall_min_distances)
+        
+    #     # Compute costs using vectorized operations
+    #     critical_mask = min_distances < 0.25
+    #     danger_mask = (min_distances >= 0.25) & (min_distances < 0.5)
+        
+    #     cost = torch.zeros_like(min_distances)
+    #     cost[critical_mask] = 10.0
+    #     cost[danger_mask] = 5.0
+        
+    #     # Scale the total cost
+    #     self._clearance_weight = 2.0
+    #     cost = cost * self._clearance_weight
+        
+    #     return cost
+
+
+
+    def dock_clearance_cost(self, positions, safe_distance=1.5):
+        """
+        CUDA-accelerated dock clearance cost computation
+        """
+        if (not hasattr(self, 'world_points') or 
+            not hasattr(self, 'labels') or 
+            self.world_points is None or 
+            self.labels is None):
+            return torch.zeros(positions.shape[0], positions.shape[1], device=positions.device)
+
+        # Move data to CUDA
+        positions_cuda = positions.cuda()
+        world_points_cuda = torch.as_tensor(self.world_points, device='cuda')
+        labels_cuda = torch.as_tensor(self.labels, device='cuda')
+        
+        # Vessel dimensions
+        length = 1.5  # Length of the vessel
+        width = 1.0   # Width of the vessel
+        
+        # Define corner points in local frame [4, 2]
+        corner_points_local = torch.as_tensor([
+            [0.5 * length, 0.5 * width],   # front-right
+            [0.5 * length, -0.5 * width],  # back-right
+            [-0.5 * length, 0.5 * width],  # front-left
+            [-0.5 * length, -0.5 * width]  # back-left
+        ], device='cuda')
+        
+        # Get positions and orientations
+        vessel_positions = positions_cuda[:, :, 0:2]  # [batch, agents, 2]
+        vessel_orientations = positions_cuda[:, :, 2]  # [batch, agents]
+        
+        batch_size, num_agents = positions_cuda.shape[0], positions_cuda.shape[1]
+        
+        # Convert orientations for vectorized rotation [batch, agents]
+        cos_theta = torch.cos(vessel_orientations)
+        sin_theta = torch.sin(vessel_orientations)
+        
+        # Create rotation matrices [batch, agents, 2, 2]
+        rot_matrices = torch.stack([
+            torch.stack([cos_theta, -sin_theta], dim=-1),
+            torch.stack([sin_theta, cos_theta], dim=-1)
+        ], dim=-2)
+        
+        # Expand corner points for batch computation [1, 1, 4, 2]
+        corner_points_local = corner_points_local.unsqueeze(0).unsqueeze(0)
+        
+        # Rotate all corner points at once [batch, agents, 4, 2]
+        corner_points_rotated = torch.matmul(corner_points_local, rot_matrices.transpose(-1, -2))
+        
+        # Add vessel positions to get world coordinates [batch, agents, 4, 2]
+        corner_points_world = corner_points_rotated + vessel_positions.unsqueeze(2)
+        
+        # Number of clusters/walls
+        n_components = len(np.unique(self.labels[self.labels != -1]))
+        
+        # Initialize minimum distances tensor
+        min_distances = torch.ones(batch_size, num_agents, device='cuda') * float('inf')
+        
+        # Compute distances for each wall cluster
+        for wall_idx in range(n_components):
+            cluster_mask = labels_cuda == wall_idx
+            cluster_points = world_points_cuda[cluster_mask]
+            
+            if len(cluster_points) == 0:
+                continue
+                
+            # Expand cluster points [1, 1, 1, n_points, 2]
+            cluster_points = cluster_points.unsqueeze(0).unsqueeze(0).unsqueeze(0)
+            
+            # Compute distances between all corners and all cluster points
+            distances = torch.norm(
+                corner_points_world.unsqueeze(3) - cluster_points,
+                dim=-1
+            )
+            
+            # Update minimum distances
+            wall_min_distances = torch.min(torch.min(distances, dim=-1)[0], dim=-1)[0]
+            min_distances = torch.minimum(min_distances, wall_min_distances)
+        
+        # Compute costs using vectorized operations
+        critical_mask = min_distances < 0.25
+        danger_mask = (min_distances >= 0.25) & (min_distances < 0.5)
+        
+        cost = torch.zeros_like(min_distances)
+        cost[critical_mask] = 10.0
+        cost[danger_mask] = 5.0
+        
+        # Scale the total cost
+        self._clearance_weight = 2.0
+        cost = cost * self._clearance_weight
+        
+        # Move result back to original device
+        return cost.to(positions.device)
+
+    def update_dock_state(self, dock_center, clearances, dock_orientation_angle, world_points, labels, entrance_point, slopes):
         """Update dock state and uncertainty information"""
-        self.dock_state = dock_state
-        self.dock_uncertainty = torch.diagonal(dock_covariance)[:3]  # Only position and orientation uncertainty
+        self.dock_center = dock_center  
+        self.dock_orientation = dock_orientation_angle  # Only position and orientation uncertainty
+        self.dock_clearances = clearances
+        self.world_points = world_points
+        self.entrance_point = entrance_point
+        self.labels = labels
+        self.slopes = slopes
 
+  
+    def dock_ori_cost(self, state):
+        theta = state[:, :, 2]
+        # Replace desired_heading with self.dock_orientation
+        heading_diff = self.dock_orientation - theta
+        
+        # Normalize the heading difference to the range [-pi, pi]
+        heading_diff = (heading_diff + torch.pi) % (2 * torch.pi) - torch.pi
+        
+        # Penalize the squared deviation from the dock orientation
+        orientation_cost = heading_diff ** 2
+        positions = state[:, :, 0:2]
+        distance_to_goal = torch.linalg.norm(state[:, :, 0:2] - self.nav_goals[:, :, 0:2], axis=2)
+
+        cost = torch.where(distance_to_goal < 0.5, (heading_diff ** 2) * self._within_goal_weight, torch.zeros_like(distance_to_goal))
+
+        return cost
+    
+    def dock_goal_cost(self, positions):
+        dgc = torch.linalg.norm(positions - self.dock_center, axis=2) * self._goal_weight
+        # print(f"GOAL COST SHAPE {gc.shape}")
+        return dgc
+    
+    def dock_entrance_cost(self, positions):
+      # Convert entrance point to tensor if it's numpy array
+   
+        # Convert entrance point and current position to tensor
+        entrance_point = torch.tensor(self.entrance_point, device=positions.device)
+        curr_pos = torch.tensor(self.curr_pos, device=positions.device)
+        if self.dec_flag:
+        
+        # Calculate distance from current position to entrance
+            dist = torch.linalg.norm(curr_pos - entrance_point)
+            
+            # If current position is far from entrance, apply cost to all trajectory points
+            if dist > 0.5:
+                distances = torch.linalg.norm(positions - entrance_point, axis=2)
+                cost = distances * self._dock_entrance_weight
+            else:
+                self.dec_flag = False
+                # Create zeros with correct shape [batch, agents]
+                distances = torch.linalg.norm(positions - entrance_point, axis=2)
+                cost = torch.zeros_like(distances)
+        else:
+            cost = torch.zeros(positions.shape[0], positions.shape[1], device=positions.device)
+        
+        return cost
+    
     def compute_running_cost(self, state: torch.Tensor):
         # print(f"STATE {state.shape}")
-        print(f"AGENT POS {self.curr_pos}")
+        # print(f"AGENT POS {self.curr_pos}")
         lc_cost =  self._lcmap_cost(state)
         # print(f"LC cost {lc_cost}")
         gc = self._goal_cost(state[:, :, 0:2]) 
+        dgc = self.dock_goal_cost(state[:, :, 0:2])
         vc = self._vel_cost(state)
         hc = self._heading_to_goal(state) 
         goc = self._goal_orientation_cost(state)
+        doc = self.dock_ori_cost(state)
+        dcc = self.dock_clearance_cost(state)
+        dec = self.dock_entrance_cost(state[:, :, 0:2])
+        # print(dec)
+        
+
         # print(f"GC {gc} vc {vc} hc {hc} goc {goc}")
         # print(f"gc {gc}")
-        total_cost = lc_cost + vc + hc + goc 
-        # total_cost = gc+ vc + hc + goc 
-        print(f"total cost {total_cost}")
+        # total_cost = lc_cost + vc + hc + goc 
+        entrance_point = torch.tensor(self.entrance_point, device=self.device)
+        curr_pos = torch.tensor(self.curr_pos, device=self.device)
+        
+        # Calculate distance from current position to entrance
+        # dist = torch.linalg.norm(curr_pos - entrance_point)
+        # print(f"flag {self.dec_flag} dist {dist}")
+        # if dist>2:
+        total_cost = dgc + vc + hc + doc  + dec  + dcc
+        # else:
+            # total_cost = gc + vc + hc + goc
+        # print(f"total cost {total_cost}")
 
-        if self.dock_state is not None:
-            total_cost += (
-                self._dock_clearance_cost(state) +     # Wall clearance
-                self._dock_alignment_cost(state) +     # Dock alignment
-                self._entrance_cost(state)             # Entrance alignment
-            )
+        # if self.dock_state is not None:
+        #     total_cost += (
+        #         self._dock_clearance_cost(state) +     # Wall clearance
+        #         self._dock_alignment_cost(state) +     # Dock alignment
+        #         self._entrance_cost(state)             # Entrance alignment
+        #     )
 
         return  total_cost
         # return lc_cost
@@ -139,6 +503,7 @@ class RoboatObjective(object):
         uncertainty_factor = torch.exp(-position_uncertainty)
         
         return torch.exp(-min_dist/self._safety_margin) * self._wall_clearance_weight * uncertainty_factor
+
 
     def _dock_alignment_cost(self, state):
         """Compute cost based on alignment with dock"""
@@ -237,12 +602,17 @@ class RoboatObjective(object):
     
     def _vel_cost(self, state):
         # convert velocities to body frame
+        '''In MPPI, the controller tries to MINIMIZE the total cost. Therefore:
+        Positive Weights: When a weight is positive, the controller tries to MINIMIZE that behavior
+        Negative Weights: When a weight is negative, the controller tries to MAXIMIZE that behavior (since minimizing a negative cost is equivalent to maximizing)
+        The magnitude of the weight determines how strongly the behavior is encouraged or discouraged relative to other objectives in the cost function.'''
         cos = torch.cos(state[:, :, 2])
         sin = torch.sin(state[:, :, 2])
         vel_body = torch.stack([state[:, :, 3] * cos + state[:, :, 4] * sin, -state[:, :, 3] * sin + state[:, :, 4] * cos], dim=2)
         
         # penalize velocities in the back, lateral and rotational directions
         back_vel_cost = torch.relu(-vel_body[:, :, 0]) * self._back_vel_weight
+        # Here relu converts backward velocity to positive , vel_body[:, :, 0] is forward velocity , -ve of which is backward velocity 
         lat_vel_cost = vel_body[:, :, 1] ** 2 * self._lat_vel_weight
         rot_vel_cost = state[:, :, 5] ** 2 * self._rot_vel_weight
 
