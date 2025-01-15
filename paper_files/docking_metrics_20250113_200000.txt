@@ -1,0 +1,17 @@
+Docking Performance Metrics:
+success: False
+position_error: 3.8237072980517004
+angle_error_deg: 167.73471010974995
+final_speed: 0.15416796043125347
+final_angular_velocity: 0.29153624176979065
+total_time: 109.55323028564453
+path_length: 9.447420436936802
+path_efficiency: 0.10337983299770316
+mean_jerk: 0.46297280170501437
+lateral_deviation: 0.9666277459492292
+orientation_stability: 0.0
+velocity_stability: 0.10680963976503317
+position_success: False
+angle_success: False
+velocity_success: False
+angular_success: False

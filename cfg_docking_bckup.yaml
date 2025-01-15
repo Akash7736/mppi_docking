@@ -1,0 +1,53 @@
+device: "cpu"
+dt: 0.1
+
+agents:
+  agent0:
+    initial_pose: [5.0, -1.0, 0.0]
+    initial_goal: [10.0,-5.0, 0.0]
+    urdf: "aritra.urdf"
+
+objective:
+  # Velocity-related weights
+  max_speed: 0.3
+  max_speed_weight: 5.0
+  back_vel_weight: 0.08
+  rot_vel_weight: 0.01
+  lat_vel_weight: 0.01
+  
+  # Goal-related weights
+  within_goal_ori_weight: 1.0
+  
+  # Dock-related weights
+  dock_entrance_weight: 3.0
+  dock_clearance_weight: 2.0
+  dock_goal_weight: 1.0
+  dock_heading_to_goal_weight: 3.0
+
+mppi: 
+  mppi_mode: "simple"  # halton-spline, simple
+  sampling_method: "halton"   # halton, random
+  num_samples: 500
+  horizon: 30                 # At least 12 for Halton Sampling
+  horizon_cutoff: 100
+  dt_cutoff: 0.5
+  lambda_: 0.1
+  update_lambda: True
+  update_cov: False
+  rollout_var_discount: 0.95
+  sample_null_action: False
+  noise_abs_cost: False
+  filter_u: False
+  use_priors: False
+  nx: 6 # number of states
+  nu: 4 # number of inputs
+  u_min: [-6, -6, -6, -6]
+  u_max: [6, 6, 6, 6]
+  noise_sigma: [[6.0, 0., 0., 0.], [0., 6.0, 0., 0.], [0., 0., 6.0, 0.], [0., 0., 0., 6.0]]
+  u_per_command: 20
+
+simulator:
+  render: True
+  steps: 500
+  urdf: "quarter_roboat.urdf"
+  mode: "thrust"

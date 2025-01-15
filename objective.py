@@ -22,29 +22,26 @@ GRID_SIZE = 200         # Reduced grid size for better performance
 RESOLUTION = 0.1       # Increased resolution (fewer cells)
 SUB_GRID_SIZE = 80     # Smaller local map   # Sub-grid size 80 x 80 for an 8m x 8m region
 abs_path = os.path.dirname(os.path.abspath(__file__))
-CONFIG = yaml.safe_load(open(f"{abs_path}/cfg_docking.yaml"))
+
 
 
 
 class RoboatObjective(object):
-    def __init__(self, goals, device="cuda:0", dock_estimator=None):
+    def __init__(self, goals, device="cuda:0", cfg=None, dock_estimator=None):
+        self.cfg = cfg 
         self.device = device
         self.nav_goals = torch.tensor(goals, device=device).unsqueeze(0)
-        self._goal_weight = 1.0
-        self._back_vel_weight = 0.08
-        self._rot_vel_weight =  0.01
-        self._lat_vel_weight = 0.01
-        self._heading_to_goal_weight =  3.0
-        self._within_goal_weight = 1.0
-        self._max_speed = 0.3
-        self._max_speed_weight = 5.0
+
+        # self._goal_weight = 1.0
+        # self._heading_to_goal_weight =  3.0
+        # self._within_goal_weight = 1.0
 
 
            # Dock-specific weights
-        self._wall_clearance_weight = 2.0
-        self._entrance_alignment_weight = 2.5
-        self._dock_orientation_weight = 2.0
-        self._safety_margin = 0.8
+        # self._wall_clearance_weight = 2.0
+        # self._entrance_alignment_weight = 2.5
+        # self._dock_orientation_weight = 2.0
+        # self._safety_margin = 0.8
         
         # State tracking
         self.local_cost = None
@@ -53,8 +50,20 @@ class RoboatObjective(object):
         self.dock_center  = None
         self.dock_orientation = None  
         self.dock_clearances = None 
-        self._dock_entrance_weight = 3.0
-        self._clearance_weight = 2.0
+        # CONFIG = yaml.safe_load(open(f"{abs_path}/cfg_docking.yaml"))
+        CONFIG = self.cfg
+
+        self._max_speed = CONFIG["objective"]["max_speed"]  # 0.3
+        self._max_speed_weight = CONFIG["objective"]["max_speed_weight"]  # 5.0
+        self._within_goal_ori_weight = CONFIG["objective"]["within_goal_ori_weight"]  # 1.0
+        self._back_vel_weight = CONFIG["objective"]["back_vel_weight"]  # 0.08
+        self._rot_vel_weight = CONFIG["objective"]["rot_vel_weight"]  # 0.01
+        self._lat_vel_weight = CONFIG["objective"]["lat_vel_weight"]  # 0.01
+        self._dock_entrance_weight = CONFIG["objective"]["dock_entrance_weight"]  # 3.0
+        self.dock_clearance_weight = CONFIG["objective"]["dock_clearance_weight"]  # 2.0
+        self.dock_goal_weight = CONFIG["objective"]["dock_goal_weight"]  # 1.0
+        self.dock_heading_to_goal_weight = CONFIG["objective"]["dock_heading_to_goal_weight"]  # 3.0
+
         self.world_points = None 
         self.labels = None 
         self.entrance_point = None
@@ -341,8 +350,8 @@ class RoboatObjective(object):
         cost[danger_mask] = 5.0
         
         # Scale the total cost
-        self._clearance_weight = 2.0
-        cost = cost * self._clearance_weight
+        self.dock_clearance_weight = 2.0
+        cost = cost * self.dock_clearance_weight
         
         # Move result back to original device
         return cost.to(positions.device)
@@ -371,12 +380,12 @@ class RoboatObjective(object):
         positions = state[:, :, 0:2]
         distance_to_goal = torch.linalg.norm(state[:, :, 0:2] - self.nav_goals[:, :, 0:2], axis=2)
 
-        cost = torch.where(distance_to_goal < 0.5, (heading_diff ** 2) * self._within_goal_weight, torch.zeros_like(distance_to_goal))
+        cost = torch.where(distance_to_goal < 0.5, (heading_diff ** 2) * self._within_goal_ori_weight, torch.zeros_like(distance_to_goal))
 
         return cost
     
     def dock_goal_cost(self, positions):
-        dgc = torch.linalg.norm(positions - self.dock_center, axis=2) * self._goal_weight
+        dgc = torch.linalg.norm(positions - self.dock_center, axis=2) * self.dock_goal_weight
         # print(f"GOAL COST SHAPE {gc.shape}")
         return dgc
     
@@ -405,16 +414,34 @@ class RoboatObjective(object):
         
         return cost
     
+    def dock_heading_to_goal(self, state):
+        # Get the heading of the agent
+        dock_center = torch.tensor(self.dock_center, device=state.device)
+        theta = state[:, :, 2]
+        # Get the vector pointing to the goal
+        goal = dock_center - state[:, :, 0:2]
+        # Compute the angle between the heading and the goal
+        angle = torch.atan2(goal[:, :, 1], goal[:, :, 0]) - theta
+        # Normalize the angle to [-pi, pi]
+        angle = (angle+ torch.pi) % (2 * torch.pi) - torch.pi
+        cost = torch.where(torch.linalg.norm(state[:,:,0:2] - dock_center, axis=2)>0.5, angle**2, torch.zeros_like(angle))
+        return cost * self.dock_heading_to_goal_weight
+    
+
+
+
     def compute_running_cost(self, state: torch.Tensor):
         # print(f"STATE {state.shape}")
         # print(f"AGENT POS {self.curr_pos}")
-        lc_cost =  self._lcmap_cost(state)
+        # lc_cost =  self._lcmap_cost(state)
         # print(f"LC cost {lc_cost}")
-        gc = self._goal_cost(state[:, :, 0:2]) 
+
+        # gc = self._goal_cost(state[:, :, 0:2]) 
         dgc = self.dock_goal_cost(state[:, :, 0:2])
         vc = self._vel_cost(state)
-        hc = self._heading_to_goal(state) 
-        goc = self._goal_orientation_cost(state)
+        # hc = self._heading_to_goal(state) 
+        dhc = self.dock_heading_to_goal(state)
+        # goc = self._goal_orientation_cost(state)
         doc = self.dock_ori_cost(state)
         dcc = self.dock_clearance_cost(state)
         dec = self.dock_entrance_cost(state[:, :, 0:2])
@@ -431,7 +458,7 @@ class RoboatObjective(object):
         # dist = torch.linalg.norm(curr_pos - entrance_point)
         # print(f"flag {self.dec_flag} dist {dist}")
         # if dist>2:
-        total_cost = dgc + vc + hc + doc  + dec  + dcc
+        total_cost = dgc + vc + dhc + doc  + dec  + dcc
         # else:
             # total_cost = gc + vc + hc + goc
         # print(f"total cost {total_cost}")
@@ -464,134 +491,134 @@ class RoboatObjective(object):
 #         print(f"STATE {state}")
 #         return self._goal_cost(state[:, :, 0:2])  + self._vel_cost(state) + self._heading_to_goal(state) +  self._goal_orientation_cost(state)
    
-    def _lcmap_cost(self, state: torch.Tensor):
-        """Compute cost from local cost map"""
-        if self.local_cost is None:
-            return torch.zeros(state.shape[0], 1, device=self.device)
+    # def _lcmap_cost(self, state: torch.Tensor):
+    #     """Compute cost from local cost map"""
+    #     if self.local_cost is None:
+    #         return torch.zeros(state.shape[0], 1, device=self.device)
 
-        cost = torch.zeros(state.shape[0], 1, device=self.device)
-        for i in range(len(state)):
-            x, y = state[i,0,0:2]
-            curx, cury = self.curr_pos
-            cost[i,0] = self.get_subgrid_value(x, y, self.local_cost, curx, cury)
+    #     cost = torch.zeros(state.shape[0], 1, device=self.device)
+    #     for i in range(len(state)):
+    #         x, y = state[i,0,0:2]
+    #         curx, cury = self.curr_pos
+    #         cost[i,0] = self.get_subgrid_value(x, y, self.local_cost, curx, cury)
 
-        return cost
+    #     return cost
 
 
-    def _dock_clearance_cost(self, state):
-        """Compute cost based on clearance from dock walls"""
-        if self.dock_state is None or self.dock_estimator is None:
-            return torch.zeros_like(state[:, :, 0])
+    # def _dock_clearance_cost(self, state):
+    #     """Compute cost based on clearance from dock walls"""
+    #     if self.dock_state is None or self.dock_estimator is None:
+    #         return torch.zeros_like(state[:, :, 0])
 
-        # Get wall positions from dock state
-        walls = self.dock_estimator.map_manager.dock_features['walls']
-        if not walls:
-            return torch.zeros_like(state[:, :, 0])
+    #     # Get wall positions from dock state
+    #     walls = self.dock_estimator.map_manager.dock_features['walls']
+    #     if not walls:
+    #         return torch.zeros_like(state[:, :, 0])
 
-        # Compute minimum distance to walls
-        vessel_positions = state[:, :, 0:2]
-        min_distances = []
+    #     # Compute minimum distance to walls
+    #     vessel_positions = state[:, :, 0:2]
+    #     min_distances = []
         
-        for wall in walls:
-            distances = self._point_to_line_distance(vessel_positions, wall)
-            min_distances.append(distances)
+    #     for wall in walls:
+    #         distances = self._point_to_line_distance(vessel_positions, wall)
+    #         min_distances.append(distances)
 
-        min_dist = torch.stack(min_distances).min(dim=0)[0]
+    #     min_dist = torch.stack(min_distances).min(dim=0)[0]
         
-        # Apply uncertainty weighting
-        position_uncertainty = self.dock_uncertainty[:2].mean()
-        uncertainty_factor = torch.exp(-position_uncertainty)
+    #     # Apply uncertainty weighting
+    #     position_uncertainty = self.dock_uncertainty[:2].mean()
+    #     uncertainty_factor = torch.exp(-position_uncertainty)
         
-        return torch.exp(-min_dist/self._safety_margin) * self._wall_clearance_weight * uncertainty_factor
+    #     return torch.exp(-min_dist/self._safety_margin) * self._wall_clearance_weight * uncertainty_factor
 
 
-    def _dock_alignment_cost(self, state):
-        """Compute cost based on alignment with dock"""
-        if self.dock_state is None:
-            return torch.zeros_like(state[:, :, 0])
+    # def _dock_alignment_cost(self, state):
+    #     """Compute cost based on alignment with dock"""
+    #     if self.dock_state is None:
+    #         return torch.zeros_like(state[:, :, 0])
 
-        # Get current heading and dock orientation
-        vessel_heading = state[:, :, 2]
-        dock_orientation = self.dock_state[2]  # Assuming dock orientation is third component
+    #     # Get current heading and dock orientation
+    #     vessel_heading = state[:, :, 2]
+    #     dock_orientation = self.dock_state[2]  # Assuming dock orientation is third component
         
-        # Compute heading difference
-        heading_diff = self._normalize_angle(vessel_heading - dock_orientation)
+    #     # Compute heading difference
+    #     heading_diff = self._normalize_angle(vessel_heading - dock_orientation)
         
-        # Weight by uncertainty
-        orientation_uncertainty = self.dock_uncertainty[2]
-        uncertainty_factor = torch.exp(-orientation_uncertainty)
+    #     # Weight by uncertainty
+    #     orientation_uncertainty = self.dock_uncertainty[2]
+    #     uncertainty_factor = torch.exp(-orientation_uncertainty)
         
-        # Distance-based weighting
-        distance = torch.norm(state[:, :, 0:2] - self.dock_state[:2], dim=2)
-        distance_weight = torch.exp(-0.5 * distance)
+    #     # Distance-based weighting
+    #     distance = torch.norm(state[:, :, 0:2] - self.dock_state[:2], dim=2)
+    #     distance_weight = torch.exp(-0.5 * distance)
         
-        return (heading_diff ** 2) * self._dock_orientation_weight * uncertainty_factor * distance_weight
+    #     return (heading_diff ** 2) * self._dock_orientation_weight * uncertainty_factor * distance_weight
 
-    def _entrance_cost(self, state):
-        """Compute cost based on alignment with dock entrance"""
-        if self.dock_state is None or 'entrance' not in self.dock_estimator.map_manager.dock_features:
-            return torch.zeros_like(state[:, :, 0])
+    # def _entrance_cost(self, state):
+    #     """Compute cost based on alignment with dock entrance"""
+    #     if self.dock_state is None or 'entrance' not in self.dock_estimator.map_manager.dock_features:
+    #         return torch.zeros_like(state[:, :, 0])
 
-        entrance = self.dock_estimator.map_manager.dock_features['entrance']
-        if not entrance:
-            return torch.zeros_like(state[:, :, 0])
+    #     entrance = self.dock_estimator.map_manager.dock_features['entrance']
+    #     if not entrance:
+    #         return torch.zeros_like(state[:, :, 0])
 
-        # Compute desired entrance vector
-        entrance_vec = torch.tensor(entrance[1]) - torch.tensor(entrance[0])
-        desired_heading = torch.atan2(entrance_vec[1], entrance_vec[0])
+    #     # Compute desired entrance vector
+    #     entrance_vec = torch.tensor(entrance[1]) - torch.tensor(entrance[0])
+    #     desired_heading = torch.atan2(entrance_vec[1], entrance_vec[0])
         
-        # Get vessel heading
-        vessel_heading = state[:, :, 2]
+    #     # Get vessel heading
+    #     vessel_heading = state[:, :, 2]
         
-        # Compute heading difference
-        heading_diff = self._normalize_angle(vessel_heading - desired_heading)
+    #     # Compute heading difference
+    #     heading_diff = self._normalize_angle(vessel_heading - desired_heading)
         
-        # Distance-based weighting
-        entrance_center = (torch.tensor(entrance[0]) + torch.tensor(entrance[1])) / 2
-        distance = torch.norm(state[:, :, 0:2] - entrance_center, dim=2)
-        distance_weight = torch.exp(-0.5 * distance)
+    #     # Distance-based weighting
+    #     entrance_center = (torch.tensor(entrance[0]) + torch.tensor(entrance[1])) / 2
+    #     distance = torch.norm(state[:, :, 0:2] - entrance_center, dim=2)
+    #     distance_weight = torch.exp(-0.5 * distance)
         
-        return (heading_diff ** 2) * self._entrance_alignment_weight * distance_weight
+    #     return (heading_diff ** 2) * self._entrance_alignment_weight * distance_weight
 
-    def _normalize_angle(self, angle):
-        """Normalize angle to [-π, π]"""
-        return torch.atan2(torch.sin(angle), torch.cos(angle))
+    # def _normalize_angle(self, angle):
+    #     """Normalize angle to [-π, π]"""
+    #     return torch.atan2(torch.sin(angle), torch.cos(angle))
 
-    def _point_to_line_distance(self, points, line):
-        """Compute distance from points to line segment"""
-        start, end = torch.tensor(line[0], device=self.device), torch.tensor(line[1], device=self.device)
-        line_vec = end - start
-        point_vec = points - start.unsqueeze(0).unsqueeze(0)
+    # def _point_to_line_distance(self, points, line):
+    #     """Compute distance from points to line segment"""
+    #     start, end = torch.tensor(line[0], device=self.device), torch.tensor(line[1], device=self.device)
+    #     line_vec = end - start
+    #     point_vec = points - start.unsqueeze(0).unsqueeze(0)
         
-        # Compute projection
-        line_length = torch.norm(line_vec)
-        line_unit = line_vec / line_length
-        projection = torch.sum(point_vec * line_unit, dim=2).clamp(0, line_length)
+    #     # Compute projection
+    #     line_length = torch.norm(line_vec)
+    #     line_unit = line_vec / line_length
+    #     projection = torch.sum(point_vec * line_unit, dim=2).clamp(0, line_length)
         
-        # Compute closest point on line
-        closest_point = start + line_unit * projection.unsqueeze(-1)
+    #     # Compute closest point on line
+    #     closest_point = start + line_unit * projection.unsqueeze(-1)
         
-        return torch.norm(points - closest_point, dim=2)
+    #     return torch.norm(points - closest_point, dim=2)
 
 
-    def get_subgrid_value(self, cartesian_x, cartesian_y, sub_grid, sub_grid_center_x, sub_grid_center_y):
-        """
-        Get the cell value in the sub-grid based on Cartesian coordinates.
-        Returns high cost for out-of-bounds coordinates.
-        """
-        # Calculate the offset in meters from the sub-grid center
-        offset_x = cartesian_x - sub_grid_center_x
-        offset_y = cartesian_y - sub_grid_center_y
+    # def get_subgrid_value(self, cartesian_x, cartesian_y, sub_grid, sub_grid_center_x, sub_grid_center_y):
+    #     """
+    #     Get the cell value in the sub-grid based on Cartesian coordinates.
+    #     Returns high cost for out-of-bounds coordinates.
+    #     """
+    #     # Calculate the offset in meters from the sub-grid center
+    #     offset_x = cartesian_x - sub_grid_center_x
+    #     offset_y = cartesian_y - sub_grid_center_y
 
-        # Convert the offset to grid indices within the 80x80 sub-grid
-        grid_x = int(SUB_GRID_SIZE // 2 + offset_x / RESOLUTION)
-        grid_y = int(SUB_GRID_SIZE // 2 + offset_y / RESOLUTION)
+    #     # Convert the offset to grid indices within the 80x80 sub-grid
+    #     grid_x = int(SUB_GRID_SIZE // 2 + offset_x / RESOLUTION)
+    #     grid_y = int(SUB_GRID_SIZE // 2 + offset_y / RESOLUTION)
 
-        # If coordinates are outside the sub-grid, return high cost
-        if not (0 <= grid_x < SUB_GRID_SIZE and 0 <= grid_y < SUB_GRID_SIZE):
-            return 1000.0  # High cost for out-of-bounds
+    #     # If coordinates are outside the sub-grid, return high cost
+    #     if not (0 <= grid_x < SUB_GRID_SIZE and 0 <= grid_y < SUB_GRID_SIZE):
+    #         return 1000.0  # High cost for out-of-bounds
 
-        return sub_grid[grid_x, grid_y].item()
+    #     return sub_grid[grid_x, grid_y].item()
 
     def _goal_cost(self, positions):
         # print(f"POS:{positions}")

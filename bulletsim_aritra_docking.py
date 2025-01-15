@@ -14,7 +14,7 @@ import torch
 import os
 import scipy.ndimage
 abs_path = os.path.dirname(os.path.abspath(__file__))
-CONFIG = yaml.safe_load(open(f"{abs_path}/cfg_docking.yaml"))
+# CONFIG = yaml.safe_load(open(f"{abs_path}/cfg_docking.yaml"))
 # CONFIG = yaml.safe_load(open(f"{abs_path}/cfg_onrt.yaml"))
 import logging 
 sim_logger = logging.getLogger("sim")
@@ -32,7 +32,7 @@ sim_logger.info("Logging from sim file.")
 GRID_SIZE = 1000         # 1000 x 1000 grid
 RESOLUTION = 0.1         # Each grid cell represents 0.1m
 SUB_GRID_SIZE = 80       # Sub-grid size 80 x 80 for an 8m x 8m region
-GLOBAL_COST_MAP = True
+GLOBAL_COST_MAP = False
 
 class Agent:
     def __init__(self, device, agent_cfg):
@@ -126,7 +126,7 @@ class Agent:
                 return i
         return None
 
-    def get_lidar_data(self, enable_noise=False, noise_std=0.1):
+    def get_lidar_data(self, enable_noise=True, noise_std=0.5):
         # Get the state of the LiDAR link
         self.lidar_state = p.getLinkState(self.robotId, self.lidar_link_index)
         self.lidar_position = self.lidar_state[0]  # World position of the LiDAR
@@ -179,6 +179,7 @@ class Agent:
 
 class BulletSimulator:
     def __init__(self, cfg):
+        self.cfg = cfg
         self.physicsClient = p.connect(p.GUI, options="--opengl3")
         p.setAdditionalSearchPath(pybullet_data.getDataPath())
         p.setGravity(0, 0, -9.81)
@@ -211,9 +212,9 @@ class BulletSimulator:
         self.trajectory_color = [1, 0, 0, 1]  # Red color for trajectory
         self.marker_color = [0, 1, 0, 1]
 
-        CONFIG = yaml.safe_load(open(f"cfg_roboats.yaml"))
+        # CONFIG = yaml.safe_load(open(f"cfg_roboats.yaml"))
         self.agent_dynamics = QuarterRoboatDynamics(
-         cfg=CONFIG
+         cfg=self.cfg
     )
     #     CONFIG_2 = yaml.safe_load(open(f"cfg_onrt.yaml"))
     #     self.agent_dynamics = VesselDynamics(
@@ -230,6 +231,8 @@ class BulletSimulator:
         self.goal_position = cfg['agents']['agent0']['initial_goal'][0:2]  # Example global goal position
         self.step_counter = 0
         self.agent_position = cfg['agents']['agent0']['initial_pose'][0:2]
+        self.dock_positions_line1 = None
+        self.dock_width = None
 
         self.dockenv()
         time.sleep(3)
@@ -254,31 +257,59 @@ class BulletSimulator:
 
         return observation_dict
 
+    def check_collision(self, debug_mode=True):
+        """Check collision for all agents"""
+        try:
+            for agent_name, agent in self._agents.items():
+                vessel_id = agent.robotId  # Get the actual PyBullet ID from the agent
+                
 
-
-    def check_collision(self):
-        for dock_id in self.docking_bay_ids:
-            contact_points = p.getContactPoints(self.agent.robotId, dock_id)
-            if len(contact_points) > 0:
-                return True
-        return False
+            #     if debug_mode:
+            # # Get current position and orientation for debug drawing
+            #         pos, orn = p.getBasePositionAndOrientation(vessel_id)
+            #         # Draw bounding box or AABB
+            #         aabb = p.getAABB(vessel_id)
+            #         p.addUserDebugLine(aabb[0], [aabb[1][0], aabb[0][1], aabb[0][2]], [1, 0, 0])
+            #         p.addUserDebugLine(aabb[0], [aabb[0][0], aabb[1][1], aabb[0][2]], [0, 1, 0])
+            #         p.addUserDebugLine(aabb[0], [aabb[0][0], aabb[0][1], aabb[1][2]], [0, 0, 1])
+                    
+                # Check collision with all dock bays
+                for dock_id in self.docking_bay_ids:
+                    contact_points = p.getContactPoints(bodyA=vessel_id, bodyB=dock_id)
+                    if contact_points:
+                        print(f"Collision detected for {agent_name}")
+                        return True
+            return False
+        
+            
+        except Exception as e:
+            print(f"Error in collision check: {str(e)}")
+            return False
+        
+        
+        # Return False in case of error
+                # for dock_id in self.docking_bay_ids:
+                #     contact_points = p.getContactPoints(self._agents['agent0'].robotId, dock_id)
+                #     if len(contact_points) > 0:
+                #         return True
+                # return False
 
 
 
     def dockenv(self):
 
 
-        dock_width = 4  # Adjust this based on the actual width of your dock bay
+        self.dock_width = 4  # Adjust this based on the actual width of your dock bay
         dock_spacing = 0.1  # Small gap between dock bays
         dock_start_x = 10  # Starting X position of the first dock bay
         dock_y_offset = -5  # Half the distance between the two lines of docks
 
         # Create positions for the first line of dock bays
-        dock_positions_line1 = [
-            [dock_start_x, dock_y_offset + i * (dock_width + dock_spacing), 0] for i in range(1)
+        self.dock_positions_line1 = [
+            [dock_start_x, dock_y_offset + i * (self.dock_width + dock_spacing), 0] for i in range(1)
         ]
 
-        dock_width = 4  # Adjust this based on the actual width of your dock bay
+        self.dock_width = 4  # Adjust this based on the actual width of your dock bay
         dock_spacing = 0.1  # Small gap between dock bays
         dock_start_x = -10  # Starting X position of the first dock bay
         dock_y_offset = 5 # Half the distance between the two lines of docks
@@ -290,7 +321,7 @@ class BulletSimulator:
         # ]
 
         # Combine both lines of dock positions
-        dock_positions = dock_positions_line1 #+ dock_positions_line2
+        dock_positions = self.dock_positions_line1 #+ dock_positions_line2
 
         # Load the dock bays
         self.docking_bay_ids = []
@@ -314,7 +345,7 @@ class BulletSimulator:
         
         def initialize_distance_grid(goal_x, goal_y):
             sim_logger.info(f"goal {goal_x} {goal_y}")
-            distance_grid = torch.zeros((GRID_SIZE, GRID_SIZE), dtype=torch.float32, device=CONFIG["device"])
+            distance_grid = torch.zeros((GRID_SIZE, GRID_SIZE), dtype=torch.float32, device=self.cfg["device"])
             
             # Calculate distance from each cell to the goal point
             for i in range(GRID_SIZE):
